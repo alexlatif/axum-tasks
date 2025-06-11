@@ -30,7 +30,7 @@
 //! #[tokio::main]
 //! async fn main() {
 //!     let app_state = AppState {
-//!         tasks: AppTasks::new(),
+//!         tasks: AppTasks::with_queue(LocalQueue::new()),
 //!     };
 //!     
 //!     let app = Router::new()
@@ -48,7 +48,7 @@ mod routes;
 mod types;
 mod worker;
 
-pub use app_tasks::{AppTasks, TaskQueueError};
+pub use app_tasks::{AppTasks, TaskQueue, TaskQueueError, LocalQueue};
 pub use metrics::TaskMetrics;
 pub use routes::admin_routes;
 pub use types::*;
@@ -66,8 +66,8 @@ pub trait TaskHandler: Send + Sync {
 }
 
 pub trait HasTasks {
-    fn tasks(&self) -> &AppTasks;
-    fn tasks_mut(&mut self) -> &mut AppTasks;
+    fn tasks(&self) -> &AppTasks<LocalQueue>;
+    fn tasks_mut(&mut self) -> &mut AppTasks<LocalQueue>;
 }
 
 type TaskHandlerT = fn(
@@ -83,7 +83,7 @@ pub struct TaskRegistration {
 inventory::collect!(TaskRegistration);
 
 pub fn init_task_system() -> (AppTasks, CancellationToken) {
-    let app_tasks = AppTasks::new();
+    let app_tasks = AppTasks::with_queue(LocalQueue::new());
     let shutdown_token = CancellationToken::new();
 
     (app_tasks, shutdown_token)
@@ -95,8 +95,14 @@ pub fn init_task_system_with_persistence<F>(
 where
     F: Fn(&std::collections::HashMap<String, TaskState>) + Send + Sync + 'static,
 {
-    let app_tasks = AppTasks::new().with_auto_persist(persistence_callback);
+    let app_tasks = AppTasks::with_queue(LocalQueue::new()).with_auto_persist(persistence_callback);
     let shutdown_token = CancellationToken::new();
 
     (app_tasks, shutdown_token)
 }
+
+#[cfg(feature = "redis")]
+pub mod redis_queue;
+
+#[cfg(feature = "postgres")]
+pub mod postgres_queue;

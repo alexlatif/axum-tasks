@@ -1,13 +1,10 @@
-use crate::{
-    AppTasks, TaskResult, TaskStatus,
-    types::{MAX_RETRIES, QueuedTask},
-};
-use flume::Receiver;
+use crate::{AppTasks, TaskResult, TaskStatus, types::{MAX_RETRIES, QueuedTask}};
+use crate::TaskQueue;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub async fn spawn_task_workers(
-    app_tasks: AppTasks,
+pub async fn spawn_task_workers<Q: TaskQueue + Clone + 'static>(
+    app_tasks: AppTasks<Q>,
     shutdown_token: CancellationToken,
     worker_count: Option<usize>,
 ) {
@@ -17,12 +14,11 @@ pub async fn spawn_task_workers(
     tracing::info!("Starting {} task workers", num_workers);
 
     for worker_id in 0..num_workers {
-        let receiver = app_tasks.receiver().clone();
         let app_tasks = app_tasks.clone();
         let token = shutdown_token.clone();
 
         let handle = tokio::spawn(async move {
-            worker_loop(worker_id, receiver, app_tasks, token).await;
+            worker_loop(worker_id, app_tasks, token).await;
         });
         handles.push(handle);
     }
@@ -60,23 +56,27 @@ pub async fn spawn_task_workers(
     tracing::info!("All workers stopped");
 }
 
-async fn worker_loop(
+async fn worker_loop<Q: TaskQueue + Clone + 'static>(
     worker_id: usize,
-    receiver: Receiver<QueuedTask>,
-    app_tasks: AppTasks,
+    app_tasks: AppTasks<Q>,
     shutdown_token: CancellationToken,
 ) {
     tracing::debug!("Worker {} started", worker_id);
 
+    let queue = app_tasks.queue_ref();
     while !shutdown_token.is_cancelled() {
         tokio::select! {
-            task_result = receiver.recv_async() => {
+            task_result = queue.dequeue() => {
                 match task_result {
-                    Ok(task) => {
+                    Ok(Some(task)) => {
                         process_task(worker_id, task, &app_tasks).await;
                     }
+                    Ok(None) => {
+                        tracing::debug!("Worker {} queue closed", worker_id);
+                        break;
+                    }
                     Err(_) => {
-                        tracing::debug!("Worker {} receiver closed", worker_id);
+                        tracing::debug!("Worker {} queue error", worker_id);
                         break;
                     }
                 }
@@ -91,7 +91,7 @@ async fn worker_loop(
     tracing::debug!("Worker {} stopped", worker_id);
 }
 
-async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) {
+async fn process_task<Q: TaskQueue + 'static>(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks<Q>) {
     let start_time = std::time::Instant::now();
 
     tracing::debug!(
@@ -102,11 +102,11 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
         "Processing task"
     );
 
-    let queue_wait_time = task.created_at.elapsed();
-    if queue_wait_time > Duration::from_secs(300) {
+    let queue_wait_time = chrono::Utc::now().signed_duration_since(task.created_at);
+    if queue_wait_time > chrono::Duration::seconds(300) {
         tracing::warn!(
             task_id = %task.id,
-            wait_time_ms = queue_wait_time.as_millis(),
+            wait_time_ms = queue_wait_time.num_milliseconds(),
             "Task waited unusually long in queue - system may be overloaded"
         );
     }
@@ -227,18 +227,16 @@ async fn execute_task_from_registry(task_name: &str, task_data: &[u8]) -> TaskRe
     TaskResult::PermanentError(format!("Unknown task type: {}", task_name))
 }
 
-async fn schedule_retry(mut task: QueuedTask, delay: Duration, app_tasks: &AppTasks) {
+async fn schedule_retry<Q: TaskQueue + 'static>(mut task: QueuedTask, delay: Duration, app_tasks: &AppTasks<Q>) {
     task.retry_count += 1;
-
-    let sender = app_tasks.sender().clone();
-
+    task.created_at = chrono::Utc::now();
+    let queue = app_tasks.queue_ref();
     tokio::spawn(async move {
         tokio::time::sleep(delay).await;
-
-        if let Err(e) = sender.send_async(task.clone()).await {
+        if let Err(e) = queue.enqueue(task.clone()).await {
             tracing::error!(
                 task_id = %task.id,
-                error = %e,
+                error = ?e,
                 "Failed to requeue task for retry"
             );
         }

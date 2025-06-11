@@ -81,11 +81,11 @@ pub fn derive_has_tasks(input: TokenStream) -> TokenStream {
 
     let expanded = quote! {
         impl axum_tasks::HasTasks for #name {
-            fn tasks(&self) -> &axum_tasks::AppTasks {
+            fn tasks(&self) -> &axum_tasks::AppTasks<axum_tasks::LocalQueue> {
                 &self.#tasks_field
             }
 
-            fn tasks_mut(&mut self) -> &mut axum_tasks::AppTasks {
+            fn tasks_mut(&mut self) -> &mut axum_tasks::AppTasks<axum_tasks::LocalQueue> {
                 &mut self.#tasks_field
             }
         }
@@ -94,47 +94,29 @@ pub fn derive_has_tasks(input: TokenStream) -> TokenStream {
     TokenStream::from(expanded)
 }
 
-fn parse_task_attributes(attrs: &[Attribute]) -> Result<(String, bool), String> {
-    let mut description = "Processing task".to_string();
-    let mut retry = true;
-
+fn parse_task_attributes(attrs: &[Attribute]) -> Result<(String, bool), syn::Error> {
+    let mut description = String::new();
+    let mut retry = false;
     for attr in attrs {
         if attr.path().is_ident("task") {
-            match &attr.meta {
-                Meta::List(_meta_list) => {
-                    attr.parse_nested_meta(|nested| {
-                        if nested.path.is_ident("description") {
-                            let value = nested.value()?;
-                            if let Ok(lit_str) = value.parse::<Lit>() {
-                                if let Lit::Str(s) = lit_str {
-                                    description = s.value();
-                                }
-                            }
-                        } else if nested.path.is_ident("retry") {
-                            let value = nested.value()?;
-                            if let Ok(lit_bool) = value.parse::<Lit>() {
-                                if let Lit::Bool(b) = lit_bool {
-                                    retry = b.value();
-                                }
-                            }
+            if let Meta::List(_meta_list) = &attr.meta {
+                attr.parse_nested_meta(|nested| {
+                    if nested.path.is_ident("description") {
+                        let value = nested.value()?;
+                        if let Lit::Str(s) = value.parse::<Lit>()? {
+                            description = s.value();
                         }
-                        Ok(())
-                    })
-                    .map_err(|e| format!("Error parsing nested meta: {}", e))?;
-                }
-                Meta::Path(_) => {
-                    // #[task] with no arguments - use defaults
-                }
-                Meta::NameValue(_) => {
-                    return Err(
-                        "task attribute should be a list: #[task(description = \"...\")]"
-                            .to_string(),
-                    );
-                }
+                    } else if nested.path.is_ident("retry") {
+                        let value = nested.value()?;
+                        if let Lit::Bool(b) = value.parse::<Lit>()? {
+                            retry = b.value();
+                        }
+                    }
+                    Ok(())
+                })?;
             }
         }
     }
-
     Ok((description, retry))
 }
 

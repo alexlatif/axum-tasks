@@ -55,7 +55,7 @@ pub struct AppState {
 #[tokio::main]
 async fn main() {
     let app_state = AppState {
-        tasks: AppTasks::new().with_auto_persist(|states| {
+        tasks: AppTasks::with_queue(LocalQueue::new()).with_auto_persist(|states| {
             tokio::spawn(async move {
                 let json = serde_json::to_string_pretty(states).unwrap();
                 tokio::fs::write("tasks.json", json).await.ok();
@@ -121,11 +121,26 @@ spawn_task_workers(tasks, shutdown, Some(8)).await;
 Persistence is user-controlled. The library provides task state, you choose how to save it:
 
 ```rust
-AppTasks::new().with_auto_persist(|task_states| {
+AppTasks::with_queue(LocalQueue::new()).with_auto_persist(|task_states| {
     // Save to PostgreSQL, Redis, file system, etc.
     save_to_your_backend(task_states);
 });
 ```
+
+## Multi-Node Support
+
+Multi-node (distributed) operation is supported with the following backends:
+- **Redis** (enable with `--features redis`)
+- **Postgres** (enable with `--features postgres`)
+
+To run in distributed (multi-node) mode, use Redis as the queue backend. You can run any number of producer (API) and worker nodes, all pointing to the same Redis instance:
+
+- **Producer node:**
+  - Run `examples/multi_producer_node.rs` to expose the HTTP API and enqueue tasks.
+- **Worker node(s):**
+  - Run `examples/multi_worker_node.rs` on one or more machines/containers to process tasks from the queue.
+
+All nodes must use the same Redis URL and queue name. This allows you to scale producers and workers independently for high availability and throughput.
 
 ## Design
 

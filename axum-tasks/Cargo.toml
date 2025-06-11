@@ -39,6 +39,9 @@ tracing = "0.1"
 async-trait = "0.1"
 inventory = "0.3"
 axum-tasks-derive = "0.1.0"
+redis = { version = "0.25", features = ["tokio-comp", "connection-manager"] }
+bincode = "1"
+tokio-postgres = { version = "0.7", features = ["with-uuid-1"], optional = true }
 
 [lib]
 name = "axum_tasks"
@@ -48,7 +51,7 @@ path = "src/lib.rs"
 tracing-subscriber = "0.3"
 tempfile = "3.0"
 
-# [features]
-# default = []
-# metrics = []
-# prometheus = ["metrics"]
+[features]
+default = []
+redis = []
+postgres = ["tokio-postgres"]

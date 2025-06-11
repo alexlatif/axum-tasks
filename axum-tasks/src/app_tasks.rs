@@ -10,31 +10,70 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+
+#[async_trait]
+pub trait TaskQueue: Send + Sync {
+    async fn enqueue(&self, task: QueuedTask) -> Result<String, TaskQueueError>;
+    async fn dequeue(&self) -> Result<Option<QueuedTask>, TaskQueueError>;
+    async fn ack(&self, task_id: &str) -> Result<(), TaskQueueError>;
+    async fn nack(&self, task_id: &str, retry_after: Option<Duration>) -> Result<(), TaskQueueError>;
+}
+
+// LocalQueue implementation using flume
 #[derive(Clone)]
-pub struct AppTasks {
-    // Internal queue (not exposed to user)
+pub struct LocalQueue {
     sender: Sender<QueuedTask>,
     receiver: Receiver<QueuedTask>,
+}
 
-    // Internal metrics (accessible via methods)
+impl LocalQueue {
+    pub fn new() -> Self {
+        let (sender, receiver) = flume::bounded(MAX_QUEUE_SIZE);
+        Self { sender, receiver }
+    }
+    pub fn sender(&self) -> &Sender<QueuedTask> { &self.sender }
+    pub fn receiver(&self) -> &Receiver<QueuedTask> { &self.receiver }
+}
+
+#[async_trait]
+impl TaskQueue for LocalQueue {
+    async fn enqueue(&self, task: QueuedTask) -> Result<String, TaskQueueError> {
+        let id = task.id.clone();
+        self.sender.send_async(task).await.map_err(|_| TaskQueueError)?;
+        Ok(id)
+    }
+    async fn dequeue(&self) -> Result<Option<QueuedTask>, TaskQueueError> {
+        match self.receiver.recv_async().await {
+            Ok(task) => Ok(Some(task)),
+            Err(flume::RecvError::Disconnected) => Ok(None),
+        }
+    }
+    async fn ack(&self, _task_id: &str) -> Result<(), TaskQueueError> {
+        Ok(())
+    }
+    async fn nack(&self, _task_id: &str, _retry_after: Option<Duration>) -> Result<(), TaskQueueError> {
+        Ok(())
+    }
+}
+
+type PersistenceCallback = Arc<dyn Fn(&HashMap<String, TaskState>) + Send + Sync>;
+
+#[derive(Clone)]
+pub struct AppTasks<Q: TaskQueue = LocalQueue> {
+    queue: Arc<Q>,
     metrics: Arc<TaskMetrics>,
-
-    // User-visible persistent state
     pub task_states: Arc<tokio::sync::RwLock<HashMap<String, TaskState>>>,
-
     // Optional auto-persistence callback
-    persistence_callback: Option<Arc<dyn Fn(&HashMap<String, TaskState>) + Send + Sync>>,
+    persistence_callback: Option<PersistenceCallback>,
 
     is_shutting_down: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl AppTasks {
-    pub fn new() -> Self {
-        let (sender, receiver) = flume::bounded(MAX_QUEUE_SIZE);
-
+impl<Q: TaskQueue> AppTasks<Q> {
+    pub fn with_queue(queue: Q) -> Self {
         Self {
-            sender,
-            receiver,
+            queue: Arc::new(queue),
             metrics: Arc::new(TaskMetrics::new()),
             task_states: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
             persistence_callback: None,
@@ -42,7 +81,6 @@ impl AppTasks {
         }
     }
 
-    /// Enable automatic persistence when task states change
     pub fn with_auto_persist<F>(mut self, callback: F) -> Self
     where
         F: Fn(&HashMap<String, TaskState>) + Send + Sync + 'static,
@@ -118,12 +156,12 @@ impl AppTasks {
             task_name,
             task_data,
             retry_count: 0,
-            created_at: std::time::Instant::now(),
+            created_at: chrono::Utc::now(),
         };
 
         match tokio::time::timeout(
             Duration::from_millis(100),
-            self.sender.send_async(queued_task),
+            self.queue.enqueue(queued_task),
         )
         .await
         {
@@ -159,11 +197,11 @@ impl AppTasks {
                         task_name: task_state.task_name.clone(),
                         task_data,
                         retry_count: task_state.retry_count,
-                        created_at: std::time::Instant::now(),
+                        created_at: chrono::Utc::now(),
                     };
 
                     // Best effort recovery - don't block startup if queue is full
-                    let _ = self.sender.try_send(queued_task);
+                    let _ = self.queue.enqueue(queued_task).await;
                 }
             }
         }
@@ -240,14 +278,6 @@ impl AppTasks {
         removed
     }
 
-    pub(crate) fn sender(&self) -> &Sender<QueuedTask> {
-        &self.sender
-    }
-
-    pub(crate) fn receiver(&self) -> &Receiver<QueuedTask> {
-        &self.receiver
-    }
-
     pub fn metrics(&self) -> crate::metrics::MetricsSnapshot {
         self.metrics.snapshot()
     }
@@ -282,6 +312,10 @@ impl AppTasks {
     pub fn is_shutting_down(&self) -> bool {
         self.is_shutting_down
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn queue_ref(&self) -> Arc<Q> {
+        self.queue.clone()
     }
 
     //=========================================================================
@@ -361,7 +395,7 @@ impl AppTasks {
 
 impl Default for AppTasks {
     fn default() -> Self {
-        Self::new()
+        Self::with_queue(LocalQueue::new())
     }
 }
 
@@ -400,7 +434,7 @@ impl<'de> Deserialize<'de> for AppTasks {
 
         let snapshot = AppTasksSnapshot::deserialize(deserializer)?;
 
-        let app_tasks = AppTasks::new();
+        let app_tasks = AppTasks::with_queue(LocalQueue::new());
 
         let states = snapshot.task_states;
         let app_tasks_clone = app_tasks.clone();
@@ -422,3 +456,9 @@ impl std::fmt::Display for TaskQueueError {
 }
 
 impl error_stack::Context for TaskQueueError {}
+
+impl Default for LocalQueue {
+    fn default() -> Self {
+        Self::new()
+    }
+}

@@ -77,13 +77,13 @@ impl TaskState {
     }
 }
 
-#[derive(Debug, Clone)]
-pub(crate) struct QueuedTask {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct QueuedTask {
     pub id: String,
     pub task_name: String,
     pub task_data: Vec<u8>,
     pub retry_count: u32,
-    pub created_at: std::time::Instant,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
