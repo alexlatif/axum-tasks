@@ -1,6 +1,6 @@
 use crate::{
     TaskMetrics, TaskState, TaskStatus,
-    types::{MAX_QUEUE_SIZE, QueuedTask},
+    types::{HealthStatus, MAX_QUEUE_SIZE, QueuedTask},
 };
 use chrono::{DateTime, Utc};
 use error_stack::ResultExt;
@@ -264,10 +264,8 @@ impl AppTasks {
     pub fn health_status(&self) -> crate::types::HealthStatus {
         let queue_depth = self.queue_depth();
 
-        if self.is_shutting_down() {
-            crate::types::HealthStatus::unhealthy(queue_depth)
-        } else if queue_depth >= MAX_QUEUE_SIZE as u64 {
-            crate::types::HealthStatus::unhealthy(queue_depth)
+        if self.is_shutting_down() || queue_depth >= MAX_QUEUE_SIZE as u64 {
+            HealthStatus::unhealthy(queue_depth)
         } else if queue_depth >= (MAX_QUEUE_SIZE as u64 * 3 / 4) {
             crate::types::HealthStatus::degraded(queue_depth)
         } else {
@@ -413,29 +411,6 @@ impl<'de> Deserialize<'de> for AppTasks {
         Ok(app_tasks)
     }
 }
-
-// #[derive(Debug)]
-// pub enum TaskQueueError {
-//     QueueFull,
-//     SendFailed,
-//     SerializationFailed,
-//     ShuttingDown,
-// }
-
-// impl std::fmt::Display for TaskQueueError {
-//     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-//         match self {
-//             TaskQueueError::QueueFull => {
-//                 write!(f, "Task queue is full (max: {} tasks)", MAX_QUEUE_SIZE)
-//             }
-//             TaskQueueError::SendFailed => write!(f, "Failed to send task to queue"),
-//             TaskQueueError::SerializationFailed => write!(f, "Failed to serialize task"),
-//             TaskQueueError::ShuttingDown => write!(f, "Task system is shutting down"),
-//         }
-//     }
-// }
-
-// impl std::error::Error for TaskQueueError {}
 
 #[derive(Debug)]
 pub struct TaskQueueError;

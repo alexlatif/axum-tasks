@@ -70,13 +70,14 @@ pub trait HasTasks {
     fn tasks_mut(&mut self) -> &mut AppTasks;
 }
 
+type TaskHandlerT = fn(
+    &[u8],
+) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = Result<TaskResult, TaskResult>> + Send>,
+>;
 pub struct TaskRegistration {
     pub name: &'static str,
-    pub handler: fn(
-        &[u8],
-    ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<TaskResult, TaskResult>> + Send>,
-    >,
+    pub handler: TaskHandlerT,
 }
 
 inventory::collect!(TaskRegistration);
@@ -99,25 +100,3 @@ where
 
     (app_tasks, shutdown_token)
 }
-
-// 💣 Crash-Proof Design:
-
-// Tasks persist before queueing
-// Server crashes don't lose tasks
-// Auto-recovery on startup
-
-// 📊 Production Features:
-
-// Built-in health checks & metrics
-// Exponential backoff retry logic
-// Graceful shutdown with timeout
-// Worker pools with backpressure
-// Structured logging throughout
-
-// 🎯 Key Design Decisions:
-
-// Single Field Management: User only needs tasks: AppTasks
-// Derive Macro Magic: #[derive(Task, HasTasks)] does everything
-// Type Erasure: Multiple task types in one queue via serde_json::Value
-// User-Controlled Persistence: Library exposes state, user saves however they want
-// Built-in Admin Routes: Zero-code task management endpoints

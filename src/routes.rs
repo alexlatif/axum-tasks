@@ -180,36 +180,29 @@ impl axum::response::IntoResponse for ApiErrorResponse {
             ApiError::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
         };
 
-        let mut error_details = Vec::new();
-        error_details.push(self.0.current_context().to_string());
-        let report_string = format!("{}", self.0);
-        let lines: Vec<&str> = report_string.lines().collect();
-        let mut additional_context = Vec::new();
-        let main_error_msg = self.0.current_context().to_string();
+        let main_error_msg = context.to_string();
+        let additional_context: Vec<String> = format!("{}", self.0)
+            .lines()
+            .map(str::trim)
+            .filter(|line| {
+                !line.is_empty()
+                    && !line.starts_with("at ")
+                    && *line != main_error_msg
+                    && !line.contains("src/")
+            })
+            .map(String::from)
+            .collect();
 
-        for line in lines.iter() {
-            let trimmed = line.trim();
-            if !trimmed.is_empty()
-                && !trimmed.starts_with("at ")
-                && trimmed != main_error_msg
-                && !trimmed.contains("src/")
-            {
-                additional_context.push(trimmed.to_string());
-            }
-        }
-
-        if additional_context.is_empty() {
-            let body = Json(serde_json::json!({
-                "error": error_message
-            }));
-            (status, body).into_response()
+        let body = if additional_context.is_empty() {
+            Json(serde_json::json!({"error": error_message}))
         } else {
-            let body = Json(serde_json::json!({
+            Json(serde_json::json!({
                 "error": error_message,
                 "context": additional_context
-            }));
-            (status, body).into_response()
-        }
+            }))
+        };
+
+        (status, body).into_response()
     }
 }
 
