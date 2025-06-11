@@ -1,0 +1,20 @@
+[package]
+name = "axum-tasks-derive"
+version = "0.1.0"
+edition = "2024"
+authors = ["Alessandro Latif <alelat19@gmail.com>"]
+license = "MIT"
+description = "Derive macros for axum-tasks - a lightweight background task queue"
+repository = "https://github.com/alexlatif/axum-tasks"
+homepage = "https://github.com/alexlatif/axum-tasks"
+documentation = "https://docs.rs/axum-tasks-derive"
+keywords = ["axum", "async", "background", "tasks", "derive"]
+readme = "../README.md"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full"] }
