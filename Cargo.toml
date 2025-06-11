@@ -1,0 +1,70 @@
+[package]
+name = "axum-tasks"
+version = "0.1.0"
+edition = "2024"
+authors = ["Alessandro Latif <alelat19@gmail.com>"]
+license = "MIT"
+description = "A lightweight background task queue for Axum applications"
+repository = "https://github.com/alexlatif/axum-tasks"
+homepage = "https://github.com/alexlatif/axum-tasks"
+documentation = "https://docs.rs/axum-tasks"
+keywords = ["axum", "async", "background", "tasks", "queue"]
+readme = "README.md"
+include = [
+    "src/**/*",
+    "examples/**/*",
+    "Cargo.toml",
+    "README.md",
+    "LICENSE"
+]
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+# Core async runtime
+tokio = { version = "1.0", features = ["full"] }
+tokio-util = "0.7"
+
+# Web framework
+axum = "0.8.4"
+tower = "0.5.2"
+tower-http = { version = "0.6.6", features = ["trace"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Queue and channels
+flume = "0.11"
+
+# Utilities
+uuid = { version = "1.0", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+num_cpus = "1.0"
+error-stack = { version = "0.5", features = ["std","backtrace"] }
+
+# Logging
+tracing = "0.1"
+
+# Proc macros
+async-trait = "0.1"
+inventory = "0.3"
+
+
+[dependencies.axum-tasks-derive]
+path = "./axum-tasks-derive"
+
+[lib]
+name = "axum_tasks"
+path = "src/lib.rs"
+
+[dev-dependencies]
+tracing-subscriber = "0.3"
+tempfile = "3.0"
+
+# [features]
+# default = []
+# metrics = []
+# prometheus = ["metrics"]
