@@ -49,7 +49,7 @@ pub fn derive_task(input: TokenStream) -> TokenStream {
         }
 
         // Auto-register with task registry
-        inventory::submit! {
+        axum_tasks::inventory::submit! {
             axum_tasks::TaskRegistration {
                 name: stringify!(#name),
                 handler: |task_data: &[u8]| {
@@ -143,7 +143,6 @@ fn find_tasks_field(data: &Data) -> proc_macro2::TokenStream {
         Data::Struct(data_struct) => {
             match &data_struct.fields {
                 Fields::Named(fields) => {
-
                     // TODO: type checks
                     for field in &fields.named {
                         if let Some(ident) = &field.ident {
