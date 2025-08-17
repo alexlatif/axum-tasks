@@ -144,6 +144,7 @@ fn find_tasks_field(data: &Data) -> proc_macro2::TokenStream {
             match &data_struct.fields {
                 Fields::Named(fields) => {
 
+                    // TODO: type checks
                     for field in &fields.named {
                         if let Some(ident) = &field.ident {
                             if ident == "tasks" {

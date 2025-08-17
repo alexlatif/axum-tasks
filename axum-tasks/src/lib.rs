@@ -56,6 +56,7 @@ pub use worker::spawn_task_workers;
 
 pub use async_trait::async_trait;
 pub use axum_tasks_derive::{HasTasks, Task};
+pub use inventory;
 pub use tokio_util::sync::CancellationToken;
 
 #[async_trait]
