@@ -115,7 +115,7 @@ version = "0.1.11"
 dependencies = [
  "async-trait",
  "axum",
- "axum-tasks-derive 0.1.0 (registry+https://github.com/rust-lang/crates.io-index)",
+ "axum-tasks-derive 0.1.0",
  "chrono",
  "error-stack",
  "flume",
@@ -136,6 +136,8 @@ dependencies = [
 [[package]]
 name = "axum-tasks-derive"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbd0f2da7958ee7180ce188d4817e359d82dc34b25708a37e5896700c8308118"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -144,9 +146,7 @@ dependencies = [
 
 [[package]]
 name = "axum-tasks-derive"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd0f2da7958ee7180ce188d4817e359d82dc34b25708a37e5896700c8308118"
+version = "0.1.1"
 dependencies = [
  "proc-macro2",
  "quote",
