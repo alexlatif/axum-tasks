@@ -1,6 +1,6 @@
 [package]
 name = "axum-tasks"
-version = "0.1.12"
+version = "0.1.13"
 edition = "2024"
 authors = ["Alessandro Latif <alelat19@gmail.com>"]
 license = "MIT"
@@ -38,7 +38,7 @@ error-stack = { version = "0.5", features = ["std","backtrace"] }
 tracing = "0.1"
 async-trait = "0.1"
 inventory = "0.3"
-axum-tasks-derive = { path = "../axum-tasks-derive" }
+axum-tasks-derive = { path = "../axum-tasks-derive", version = "0.1.11" }
 
 [lib]
 name = "axum_tasks"
