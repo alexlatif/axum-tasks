@@ -1,5 +1,5 @@
 use crate::{
-    TaskMetrics, TaskState, TaskStatus,
+    CachedJobResult, JobMetrics, TaskMetrics, TaskState, TaskStatus,
     types::{HealthStatus, MAX_QUEUE_SIZE, QueuedTask},
 };
 use chrono::{DateTime, Utc};
@@ -9,22 +9,17 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::RwLock;
 
 #[derive(Clone)]
 pub struct AppTasks {
-    // Internal queue (not exposed to user)
+    // Internal queue
     sender: Sender<QueuedTask>,
     receiver: Receiver<QueuedTask>,
-
-    // Internal metrics (accessible via methods)
     metrics: Arc<TaskMetrics>,
-
-    // User-visible persistent state
-    pub task_states: Arc<tokio::sync::RwLock<HashMap<String, TaskState>>>,
-
-    // Optional auto-persistence callback
+    task_states: Arc<tokio::sync::RwLock<HashMap<String, TaskState>>>,
+    results_cache: Arc<RwLock<HashMap<String, CachedJobResult>>>,
     persistence_callback: Option<Arc<dyn Fn(&HashMap<String, TaskState>) + Send + Sync>>,
-
     is_shutting_down: Arc<std::sync::atomic::AtomicBool>,
 }
 
@@ -37,6 +32,7 @@ impl AppTasks {
             receiver,
             metrics: Arc::new(TaskMetrics::new()),
             task_states: Arc::new(tokio::sync::RwLock::new(HashMap::new())),
+            results_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence_callback: None,
             is_shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         }
@@ -179,8 +175,23 @@ impl AppTasks {
         self.task_states.read().await.clone()
     }
 
+    pub async fn get_status(&self, job_id: &str) -> Option<TaskStatus> {
+        let states = self.task_states.read().await;
+        states.get(job_id).map(|state| state.status.clone())
+    }
+
     pub async fn get_task(&self, task_id: &str) -> Option<TaskState> {
         self.task_states.read().await.get(task_id).cloned()
+    }
+
+    pub async fn get_result(&self, job_id: &str) -> Option<CachedJobResult> {
+        let results = self.results_cache.read().await;
+        results.get(job_id).cloned()
+    }
+
+    pub async fn get_job_metrics(&self, job_id: &str) -> Option<JobMetrics> {
+        let states = self.task_states.read().await;
+        states.get(job_id).map(JobMetrics::from)
     }
 
     pub async fn list_tasks(
@@ -212,6 +223,59 @@ impl AppTasks {
             .filter(|task| task.status == status)
             .cloned()
             .collect()
+    }
+
+    pub async fn store_success(
+        &self,
+        job_id: String,
+        data: serde_json::Value,
+        ttl: Option<Duration>,
+    ) {
+        let cached_result = CachedJobResult {
+            job_id: job_id.clone(),
+            completed_at: Utc::now(),
+            success: true,
+            data,
+            error: None,
+            ttl,
+        };
+
+        let mut results = self.results_cache.write().await;
+        results.insert(job_id.clone(), cached_result);
+
+        if let Some(ttl) = ttl {
+            let cache = self.results_cache.clone();
+            let id = job_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(ttl).await;
+                let mut results = cache.write().await;
+                results.remove(&id);
+            });
+        }
+    }
+
+    pub async fn store_failure(&self, job_id: String, error: String, ttl: Option<Duration>) {
+        let cached_result = CachedJobResult {
+            job_id: job_id.clone(),
+            completed_at: Utc::now(),
+            success: false,
+            data: serde_json::json!({}),
+            error: Some(error),
+            ttl,
+        };
+
+        let mut results = self.results_cache.write().await;
+        results.insert(job_id.clone(), cached_result);
+
+        if let Some(ttl) = ttl {
+            let cache = self.results_cache.clone();
+            let id = job_id.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(ttl).await;
+                let mut results = cache.write().await;
+                results.remove(&id);
+            });
+        }
     }
 
     pub async fn cleanup_old_tasks(&self, older_than: DateTime<Utc>) -> usize {
@@ -248,7 +312,7 @@ impl AppTasks {
         &self.receiver
     }
 
-    pub fn metrics(&self) -> crate::metrics::MetricsSnapshot {
+    pub fn get_task_metrics(&self) -> crate::metrics::MetricsSnapshot {
         self.metrics.snapshot()
     }
 

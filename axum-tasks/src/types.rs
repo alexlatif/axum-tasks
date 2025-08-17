@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::time::Duration;
 
 pub const MAX_QUEUE_SIZE: usize = 10_000;
 pub const MAX_RETRIES: u32 = 3;
@@ -77,6 +78,31 @@ impl TaskState {
     }
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct JobMetrics {
+    pub status: TaskStatus,
+    pub created_at: DateTime<Utc>,
+    pub started_at: Option<DateTime<Utc>>,
+    pub retry_count: u32,
+    pub error_message: Option<String>,
+    pub duration_ms: Option<u64>,
+    pub worker_id: Option<usize>,
+}
+
+impl From<&TaskState> for JobMetrics {
+    fn from(state: &TaskState) -> Self {
+        JobMetrics {
+            status: state.status.clone(),
+            created_at: state.created_at,
+            started_at: state.started_at,
+            retry_count: state.retry_count,
+            error_message: state.error_message.clone(),
+            duration_ms: state.duration_ms,
+            worker_id: state.worker_id,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(crate) struct QueuedTask {
     pub id: String,
@@ -125,4 +151,14 @@ impl HealthStatus {
             accepting_tasks: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedJobResult {
+    pub job_id: String,
+    pub completed_at: DateTime<Utc>,
+    pub success: bool,
+    pub data: serde_json::Value, // The actual response/output data
+    pub error: Option<String>,   // Error message if failed
+    pub ttl: Option<Duration>,   // Optional TTL for auto-cleanup
 }

@@ -1,4 +1,4 @@
-use crate::{HasTasks, TaskStatus};
+use crate::{CachedJobResult, HasTasks, JobMetrics, TaskStatus};
 use axum::{
     Router,
     extract::{Path, Query, State},
@@ -16,6 +16,8 @@ where
     Router::new()
         .route("/tasks", get(list_tasks::<T>))
         .route("/tasks/{task_id}", get(get_task_status::<T>))
+        .route("/tasks/{task_id}/metrics", get(get_job_metrics::<T>)) // NEW
+        .route("/tasks/{task_id}/result", get(get_job_result::<T>))
         .route("/tasks/by-status/{status}", get(get_tasks_by_status::<T>))
         .route("/cleanup", post(cleanup_old_tasks::<T>))
         .route("/health", get(health_check::<T>))
@@ -77,6 +79,48 @@ where
     Ok(Json(tasks))
 }
 
+async fn get_job_metrics<T>(
+    State(state): State<T>,
+    Path(task_id): Path<String>,
+) -> Result<Json<JobMetrics>, ApiErrorResponse>
+where
+    T: HasTasks,
+{
+    match state.tasks().get_job_metrics(&task_id).await {
+        Some(metrics) => Ok(Json(metrics)),
+        None => Err(error_stack::report!(ApiError::NotFound(task_id.clone()))
+            .attach_printable("Task does not exist")
+            .into()),
+    }
+}
+
+async fn get_job_result<T>(
+    State(state): State<T>,
+    Path(task_id): Path<String>,
+) -> Result<Json<CachedJobResult>, ApiErrorResponse>
+where
+    T: HasTasks,
+{
+    let status = state.tasks().get_status(&task_id).await.ok_or_else(|| {
+        error_stack::report!(ApiError::NotFound(task_id.clone()))
+            .attach_printable("Task does not exist")
+    })?;
+
+    match status {
+        TaskStatus::Completed | TaskStatus::Failed => {
+            match state.tasks().get_result(&task_id).await {
+                Some(result) => Ok(Json(result)),
+                None => Err(error_stack::report!(ApiError::NotFound(task_id.clone()))
+                    .attach_printable("Result no longer in cache")
+                    .into()),
+            }
+        }
+        _ => Err(error_stack::report!(ApiError::BadRequest(task_id.clone()))
+            .attach_printable("Task not yet completed")
+            .into()),
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct CleanupRequest {
     older_than_hours: Option<u64>,
@@ -116,7 +160,7 @@ async fn get_metrics<T>(State(state): State<T>) -> Json<crate::metrics::MetricsS
 where
     T: HasTasks,
 {
-    Json(state.tasks().metrics())
+    Json(state.tasks().get_task_metrics())
 }
 
 #[derive(Debug, Serialize)]
