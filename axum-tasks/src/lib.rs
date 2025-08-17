@@ -16,9 +16,9 @@
 //! }
 //!
 //! impl DataProcessing {
-//!     async fn execute(&self) -> TaskResult {
+//!     pub async fn execute(&self) -> TaskResult {
 //!         // Your task logic here
-//!         TaskResult::Success
+//!         TaskResult::Success("autosave data".to_string())
 //!     }
 //! }
 //!
@@ -61,7 +61,7 @@ pub use tokio_util::sync::CancellationToken;
 
 #[async_trait]
 pub trait TaskHandler: Send + Sync {
-    async fn handle(&self) -> TaskResult;
+    async fn handle(&self, app_tasks: &AppTasks, job_id: &str) -> TaskResult;
     fn description(&self) -> String;
     fn is_retryable(&self, error: &str) -> bool;
 }
@@ -71,11 +71,10 @@ pub trait HasTasks {
     fn tasks_mut(&mut self) -> &mut AppTasks;
 }
 
-type TaskHandlerT = fn(
-    &[u8],
-) -> std::pin::Pin<
-    Box<dyn std::future::Future<Output = Result<TaskResult, TaskResult>> + Send>,
->;
+pub type TaskFuture<'a> =
+    std::pin::Pin<Box<dyn Future<Output = Result<TaskResult, TaskResult>> + Send + 'a>>;
+pub type TaskHandlerT = for<'a> fn(&'a [u8], &'a AppTasks, &str) -> TaskFuture<'a>;
+
 pub struct TaskRegistration {
     pub name: &'static str,
     pub handler: TaskHandlerT,

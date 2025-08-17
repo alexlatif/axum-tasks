@@ -24,19 +24,47 @@ pub fn derive_task(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
     let name = &input.ident;
 
-    // Parse task attributes
     let (description, retry) = match parse_task_attributes(&input.attrs) {
         Ok(attrs) => attrs,
-        Err(e) => {
-            panic!("Failed to parse task attributes: {}", e);
-        }
+        Err(e) => panic!("Failed to parse task attributes: {}", e),
     };
 
     let expanded = quote! {
         #[async_trait::async_trait]
         impl axum_tasks::TaskHandler for #name {
-            async fn handle(&self) -> axum_tasks::TaskResult {
-                self.execute().await
+            async fn handle(&self, app_tasks: &axum_tasks::AppTasks, job_id: &str) -> axum_tasks::TaskResult {
+                // Call execute and handle the output
+                let output = self.execute().await;
+
+                match output {
+                    axum_tasks::TaskOutput::Success(data) => {
+                        // Store the successful result
+                        app_tasks.store_success(
+                            job_id.to_string(),
+                            data,
+                            Some(std::time::Duration::from_secs(3600))  // 1 hour TTL
+                        ).await;
+                        axum_tasks::TaskResult::Success
+                    }
+                    axum_tasks::TaskOutput::RetryableError(error) => {
+                        // Store the failure
+                        app_tasks.store_failure(
+                            job_id.to_string(),
+                            error.clone(),
+                            Some(std::time::Duration::from_secs(3600))
+                        ).await;
+                        axum_tasks::TaskResult::RetryableError(error)
+                    }
+                    axum_tasks::TaskOutput::PermanentError(error) => {
+                        // Store the failure
+                        app_tasks.store_failure(
+                            job_id.to_string(),
+                            error.clone(),
+                            Some(std::time::Duration::from_secs(3600))
+                        ).await;
+                        axum_tasks::TaskResult::PermanentError(error)
+                    }
+                }
             }
 
             fn description(&self) -> String {
@@ -49,17 +77,19 @@ pub fn derive_task(input: TokenStream) -> TokenStream {
         }
 
         // Auto-register with task registry
-        axum_tasks::inventory::submit! {
+        ::axum_tasks::inventory::submit! {
             axum_tasks::TaskRegistration {
                 name: stringify!(#name),
-                handler: |task_data: &[u8]| {
+                handler: |task_data: &[u8], app_tasks: &axum_tasks::AppTasks, job_id: &str| {
                     let task_data = task_data.to_vec();
+                    let app_tasks = app_tasks.clone();
+                    let job_id = job_id.to_string();
                     Box::pin(async move {
                         let task: #name = serde_json::from_slice(&task_data)
                             .map_err(|e| axum_tasks::TaskResult::PermanentError(
                                 format!("Deserialization failed: {}", e)
                             ))?;
-                        Ok(task.handle().await)
+                        Ok(task.handle(&app_tasks, &job_id).await)
                     })
                 }
             }

@@ -38,7 +38,7 @@ error-stack = { version = "0.5", features = ["std","backtrace"] }
 tracing = "0.1"
 async-trait = "0.1"
 inventory = "0.3"
-axum-tasks-derive = "0.1.0"
+axum-tasks-derive = { path = "../axum-tasks-derive" }
 
 [lib]
 name = "axum_tasks"

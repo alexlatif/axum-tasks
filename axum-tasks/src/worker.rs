@@ -121,7 +121,8 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
         )
         .await;
 
-    let result = execute_task_from_registry(&task.task_name, &task.task_data).await;
+    let result =
+        execute_task_from_registry(&task.task_name, &task.task_data, app_tasks, &task.id).await;
     let duration = start_time.elapsed();
     let duration_ms = duration.as_millis() as u64;
 
@@ -213,11 +214,16 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
     }
 }
 
-async fn execute_task_from_registry(task_name: &str, task_data: &[u8]) -> TaskResult {
+async fn execute_task_from_registry(
+    task_name: &str,
+    task_data: &[u8],
+    app_tasks: &AppTasks,
+    job_id: &str,
+) -> TaskResult {
     // Use the global task registry to find and execute the task
     for registration in inventory::iter::<crate::TaskRegistration> {
         if registration.name == task_name {
-            match (registration.handler)(task_data).await {
+            match (registration.handler)(task_data, app_tasks, job_id).await {
                 Ok(result) => return result,
                 Err(error_result) => return error_result,
             }

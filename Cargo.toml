@@ -1,3 +1,7 @@
 [workspace]
 members = ["axum-tasks", "axum-tasks-derive"]
 resolver = "2"
+
+[patch.crates-io]
+axum-tasks = { path = "axum-tasks" }
+axum-tasks-derive = { path = "axum-tasks-derive" }

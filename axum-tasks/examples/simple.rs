@@ -5,7 +5,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_tasks::{
-    AppTasks, CancellationToken, HasTasks, Task, TaskHandler, TaskResult, admin_routes,
+    AppTasks, CancellationToken, HasTasks, Task, TaskHandler, TaskOutput, admin_routes,
     spawn_task_workers,
 };
 use serde::{Deserialize, Serialize};
@@ -20,16 +20,20 @@ pub struct DataProcessor {
 }
 
 impl DataProcessor {
-    async fn execute(&self) -> TaskResult {
+    pub async fn execute(&self) -> TaskOutput {
         info!("Processing data: {} for user {}", self.data, self.user_id);
 
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Randomly succeed or fail
         if self.data.len() % 3 == 0 {
-            TaskResult::RetryableError("Temporary processing error".to_string())
+            TaskOutput::RetryableError("Temporary processing error".to_string())
         } else {
-            TaskResult::Success
+            // auotsaves
+            TaskOutput::Success(serde_json::json!({
+                "message": format!("Processed data: {}", self.data),
+                "user_id": self.user_id,
+            }))
         }
     }
 }

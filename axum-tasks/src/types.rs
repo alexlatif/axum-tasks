@@ -13,12 +13,29 @@ pub enum TaskResult {
     PermanentError(String),
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum TaskOutput {
+    Success(serde_json::Value),
+    RetryableError(String),
+    PermanentError(String),
+}
+
 impl fmt::Display for TaskResult {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             TaskResult::Success => write!(f, "Success"),
             TaskResult::RetryableError(err) => write!(f, "Retryable Error: {}", err),
             TaskResult::PermanentError(err) => write!(f, "Permanent Error: {}", err),
+        }
+    }
+}
+
+impl From<TaskOutput> for TaskResult {
+    fn from(output: TaskOutput) -> Self {
+        match output {
+            TaskOutput::Success(_) => TaskResult::Success,
+            TaskOutput::RetryableError(e) => TaskResult::RetryableError(e),
+            TaskOutput::PermanentError(e) => TaskResult::PermanentError(e),
         }
     }
 }
