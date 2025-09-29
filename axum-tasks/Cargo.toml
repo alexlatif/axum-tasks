@@ -1,6 +1,6 @@
 [package]
 name = "axum-tasks"
-version = "0.1.13"
+version = "0.1.14"
 edition = "2024"
 authors = ["Alessandro Latif <alelat19@gmail.com>"]
 license = "MIT"

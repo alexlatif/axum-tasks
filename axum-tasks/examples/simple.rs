@@ -121,11 +121,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Start background workers
     let shutdown_token = CancellationToken::new();
     let tasks = app_state.tasks.clone();
-    let worker_shutdown = shutdown_token.clone();
-    tokio::spawn(async move {
-        spawn_task_workers(tasks, worker_shutdown, Some(6)).await;
-    });
-
+    spawn_task_workers(tasks, shutdown_token.clone(), Some(4));
     // Build routes
     let app = Router::new()
         .route("/", get(home))

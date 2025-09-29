@@ -6,88 +6,43 @@ use flume::Receiver;
 use std::time::Duration;
 use tokio_util::sync::CancellationToken;
 
-pub async fn spawn_task_workers(
+/// Spawns background task workers. Returns immediately.
+/// Workers process tasks until shutdown, completing their current task before exiting.
+pub fn spawn_task_workers(
     app_tasks: AppTasks,
-    shutdown_token: CancellationToken,
+    shutdown: CancellationToken,
     worker_count: Option<usize>,
 ) {
-    let mut handles = Vec::new();
-    // Default to half the CPU cores, but at least 4 workers
     let num_workers = worker_count.unwrap_or_else(|| std::cmp::max(4, num_cpus::get() / 2));
     tracing::info!("Starting {} task workers", num_workers);
-
     for worker_id in 0..num_workers {
         let receiver = app_tasks.receiver().clone();
         let app_tasks = app_tasks.clone();
-        let token = shutdown_token.clone();
-
-        let handle = tokio::spawn(async move {
-            worker_loop(worker_id, receiver, app_tasks, token).await;
+        let shutdown = shutdown.clone();
+        tokio::spawn(async move {
+            worker_loop(worker_id, receiver, app_tasks, shutdown).await;
         });
-        handles.push(handle);
     }
-
-    tokio::select! {
-        _ = tokio::signal::ctrl_c() => {
-            tracing::info!("Ctrl-C received, shutting down workers...");
-        }
-        _ = shutdown_token.cancelled() => {
-            tracing::info!("Shutdown token cancelled, stopping workers...");
-        }
-    }
-
-    shutdown_token.cancel();
-
-    let shutdown_timeout = Duration::from_secs(10);
-    let start = std::time::Instant::now();
-
-    for (i, handle) in handles.into_iter().enumerate() {
-        let remaining_time = shutdown_timeout.saturating_sub(start.elapsed());
-
-        match tokio::time::timeout(remaining_time, handle).await {
-            Ok(Ok(_)) => {
-                tracing::debug!("Worker {} stopped gracefully", i);
-            }
-            Ok(Err(e)) => {
-                tracing::error!("Worker {} panicked: {}", i, e);
-            }
-            Err(_) => {
-                tracing::warn!("Worker {} did not stop within timeout", i);
-            }
-        }
-    }
-
-    tracing::info!("All workers stopped");
 }
 
 async fn worker_loop(
     worker_id: usize,
     receiver: Receiver<QueuedTask>,
     app_tasks: AppTasks,
-    shutdown_token: CancellationToken,
+    shutdown: CancellationToken,
 ) {
     tracing::debug!("Worker {} started", worker_id);
-
-    while !shutdown_token.is_cancelled() {
+    loop {
         tokio::select! {
             task_result = receiver.recv_async() => {
                 match task_result {
-                    Ok(task) => {
-                        process_task(worker_id, task, &app_tasks).await;
-                    }
-                    Err(_) => {
-                        tracing::debug!("Worker {} receiver closed", worker_id);
-                        break;
-                    }
+                    Ok(task) => process_task(worker_id, task, &app_tasks).await,
+                    Err(_) => break,
                 }
             }
-            _ = shutdown_token.cancelled() => {
-                tracing::debug!("Worker {} received shutdown signal", worker_id);
-                break;
-            }
+            _ = shutdown.cancelled() => break,
         }
     }
-
     tracing::debug!("Worker {} stopped", worker_id);
 }
 
