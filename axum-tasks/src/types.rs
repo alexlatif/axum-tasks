@@ -47,6 +47,7 @@ pub enum TaskStatus {
     Completed,
     Failed,
     Retrying,
+    Cancelled,
 }
 
 impl fmt::Display for TaskStatus {
@@ -57,6 +58,7 @@ impl fmt::Display for TaskStatus {
             TaskStatus::Completed => write!(f, "completed"),
             TaskStatus::Failed => write!(f, "failed"),
             TaskStatus::Retrying => write!(f, "retrying"),
+            TaskStatus::Cancelled => write!(f, "cancelled"),
         }
     }
 }
@@ -78,7 +80,7 @@ pub struct TaskState {
 
 impl TaskState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self.status, TaskStatus::Completed | TaskStatus::Failed)
+        matches!(self.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled)
     }
 
     pub fn can_retry(&self) -> bool {

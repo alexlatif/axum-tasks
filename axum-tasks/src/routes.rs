@@ -16,8 +16,9 @@ where
     Router::new()
         .route("/tasks", get(list_tasks::<T>))
         .route("/tasks/{task_id}", get(get_task_status::<T>))
-        .route("/tasks/{task_id}/metrics", get(get_job_metrics::<T>)) // NEW
+        .route("/tasks/{task_id}/metrics", get(get_job_metrics::<T>))
         .route("/tasks/{task_id}/result", get(get_job_result::<T>))
+        .route("/tasks/{task_id}/cancel", post(cancel_task::<T>))
         .route("/tasks/by-status/{status}", get(get_tasks_by_status::<T>))
         .route("/cleanup", post(cleanup_old_tasks::<T>))
         .route("/health", get(health_check::<T>))
@@ -250,6 +251,26 @@ impl axum::response::IntoResponse for ApiErrorResponse {
     }
 }
 
+async fn cancel_task<T>(
+    State(state): State<T>,
+    Path(task_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiErrorResponse>
+where
+    T: HasTasks,
+{
+    let cancelled = state.tasks().cancel_task(&task_id).await;
+    if cancelled {
+        Ok(Json(serde_json::json!({
+            "task_id": task_id,
+            "status": "cancelled"
+        })))
+    } else {
+        Err(error_stack::report!(ApiError::BadRequest(task_id.clone()))
+            .attach_printable("Task not found or already in terminal state")
+            .into())
+    }
+}
+
 fn parse_task_status(status_str: &str) -> Result<TaskStatus, ApiErrorResponse> {
     match status_str.to_lowercase().as_str() {
         "queued" => Ok(TaskStatus::Queued),
@@ -257,10 +278,11 @@ fn parse_task_status(status_str: &str) -> Result<TaskStatus, ApiErrorResponse> {
         "completed" | "success" | "done" => Ok(TaskStatus::Completed),
         "failed" | "error" => Ok(TaskStatus::Failed),
         "retrying" | "retry" => Ok(TaskStatus::Retrying),
+        "cancelled" | "canceled" => Ok(TaskStatus::Cancelled),
         _ => Err(
             error_stack::report!(ApiError::InvalidStatus(status_str.to_string()))
                 .attach_printable(
-                    "Valid statuses: queued, in_progress, completed, failed, retrying",
+                    "Valid statuses: queued, in_progress, completed, failed, retrying, cancelled",
                 )
                 .into(),
         ),

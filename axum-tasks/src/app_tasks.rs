@@ -11,6 +11,9 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::RwLock;
 
+/// Default task timeout: 30 minutes.
+const DEFAULT_TASK_TIMEOUT_SECS: u64 = 30 * 60;
+
 #[derive(Clone)]
 pub struct AppTasks {
     // Internal queue
@@ -21,6 +24,10 @@ pub struct AppTasks {
     results_cache: Arc<RwLock<HashMap<String, CachedJobResult>>>,
     persistence_callback: Option<Arc<dyn Fn(&HashMap<String, TaskState>) + Send + Sync>>,
     is_shutting_down: Arc<std::sync::atomic::AtomicBool>,
+    /// Per-task cancellation tokens. Workers check these during execution.
+    cancellation_tokens: Arc<RwLock<HashMap<String, tokio_util::sync::CancellationToken>>>,
+    /// Task timeout in seconds. Tasks running longer than this are auto-cancelled.
+    task_timeout_secs: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl AppTasks {
@@ -35,7 +42,21 @@ impl AppTasks {
             results_cache: Arc::new(RwLock::new(HashMap::new())),
             persistence_callback: None,
             is_shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            cancellation_tokens: Arc::new(RwLock::new(HashMap::new())),
+            task_timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_TASK_TIMEOUT_SECS)),
         }
+    }
+
+    /// Set the task timeout in seconds. Tasks running longer than this are auto-failed.
+    /// Default: 30 minutes (1800 seconds).
+    pub fn with_task_timeout(self, timeout_secs: u64) -> Self {
+        self.task_timeout_secs.store(timeout_secs, std::sync::atomic::Ordering::Relaxed);
+        self
+    }
+
+    /// Get the current task timeout.
+    pub fn task_timeout(&self) -> Duration {
+        Duration::from_secs(self.task_timeout_secs.load(std::sync::atomic::Ordering::Relaxed))
     }
 
     /// Enable automatic persistence when task states change
@@ -284,7 +305,7 @@ impl AppTasks {
 
         states.retain(|_, task| {
             match task.status {
-                TaskStatus::Completed | TaskStatus::Failed => task
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled => task
                     .completed_at
                     .is_none_or(|completed| completed >= older_than),
                 _ => true, // Keep in-progress tasks
@@ -348,6 +369,68 @@ impl AppTasks {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// Cancel a task by ID. If the task is in-progress, signals the worker
+    /// to abort it. If queued, marks it as cancelled immediately.
+    /// Returns true if the task was found and cancellation was initiated.
+    pub async fn cancel_task(&self, task_id: &str) -> bool {
+        let states = self.task_states.read().await;
+        let status = match states.get(task_id) {
+            Some(task) => task.status.clone(),
+            None => return false,
+        };
+        drop(states);
+
+        match status {
+            TaskStatus::Queued => {
+                // Mark as cancelled directly
+                self.update_task_status(
+                    task_id,
+                    TaskStatus::Cancelled,
+                    None,
+                    None,
+                    Some("Cancelled by user".to_string()),
+                ).await;
+                true
+            }
+            TaskStatus::InProgress => {
+                // Signal the cancellation token
+                let tokens = self.cancellation_tokens.read().await;
+                if let Some(token) = tokens.get(task_id) {
+                    token.cancel();
+                    tracing::info!(task_id = %task_id, "Cancellation signalled for in-progress task");
+                    true
+                } else {
+                    // Token not found — force-fail the task
+                    tracing::warn!(task_id = %task_id, "No cancellation token found, force-failing task");
+                    self.update_task_status(
+                        task_id,
+                        TaskStatus::Cancelled,
+                        None,
+                        None,
+                        Some("Force-cancelled (no token)".to_string()),
+                    ).await;
+                    true
+                }
+            }
+            // Already terminal
+            _ => false,
+        }
+    }
+
+    /// Create a cancellation token for a task. Called by worker before execution.
+    pub(crate) async fn create_cancellation_token(&self, task_id: &str) -> tokio_util::sync::CancellationToken {
+        let token = tokio_util::sync::CancellationToken::new();
+        let mut tokens = self.cancellation_tokens.write().await;
+        tokens.insert(task_id.to_string(), token.clone());
+        token
+    }
+
+    /// Remove a cancellation token after task completes. Called by worker.
+    pub(crate) async fn remove_cancellation_token(&self, task_id: &str) {
+        let mut tokens = self.cancellation_tokens.write().await;
+        tokens.remove(task_id);
+    }
+
     //=========================================================================
     // INTERNAL METHODS (used by worker system)
     //=========================================================================
@@ -381,7 +464,7 @@ impl AppTasks {
                 TaskStatus::InProgress => {
                     task.started_at = Some(Utc::now());
                 }
-                TaskStatus::Completed | TaskStatus::Failed => {
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled => {
                     task.completed_at = Some(Utc::now());
                 }
                 TaskStatus::Retrying => {

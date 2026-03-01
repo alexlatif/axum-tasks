@@ -66,6 +66,18 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
         );
     }
 
+    // Check if task was already cancelled while queued
+    if let Some(status) = app_tasks.get_status(&task.id).await {
+        if matches!(status, TaskStatus::Cancelled) {
+            tracing::info!(task_id = %task.id, "Skipping already-cancelled task");
+            return;
+        }
+    }
+
+    // Create a per-task cancellation token before marking in-progress
+    let cancel_token = app_tasks.create_cancellation_token(&task.id).await;
+    let timeout = app_tasks.task_timeout();
+
     app_tasks
         .update_task_status(
             &task.id,
@@ -76,8 +88,46 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
         )
         .await;
 
-    let result =
-        execute_task_from_registry(&task.task_name, &task.task_data, app_tasks, &task.id).await;
+    // Execute with timeout and cancellation
+    let result = tokio::select! {
+        res = execute_task_from_registry(&task.task_name, &task.task_data, app_tasks, &task.id) => res,
+        _ = cancel_token.cancelled() => {
+            tracing::warn!(task_id = %task.id, worker_id = worker_id, "Task cancelled");
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            app_tasks.update_task_status(
+                &task.id,
+                TaskStatus::Cancelled,
+                Some(worker_id),
+                Some(duration_ms),
+                Some("Cancelled by user".to_string()),
+            ).await;
+            app_tasks.remove_cancellation_token(&task.id).await;
+            return;
+        }
+        _ = tokio::time::sleep(timeout) => {
+            tracing::error!(
+                task_id = %task.id,
+                worker_id = worker_id,
+                timeout_secs = timeout.as_secs(),
+                "Task timed out"
+            );
+            let duration_ms = start_time.elapsed().as_millis() as u64;
+            app_tasks.update_task_status(
+                &task.id,
+                TaskStatus::Failed,
+                Some(worker_id),
+                Some(duration_ms),
+                Some(format!("Task timed out after {}s", timeout.as_secs())),
+            ).await;
+            app_tasks.metrics_ref().record_failed();
+            app_tasks.remove_cancellation_token(&task.id).await;
+            return;
+        }
+    };
+
+    // Clean up cancellation token
+    app_tasks.remove_cancellation_token(&task.id).await;
+
     let duration = start_time.elapsed();
     let duration_ms = duration.as_millis() as u64;
 
