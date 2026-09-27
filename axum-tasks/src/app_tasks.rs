@@ -129,6 +129,9 @@ impl AppTasks {
         {
             let mut states = self.task_states.write().await;
             states.insert(task_id.clone(), task_state);
+            // Account before exposing the task to workers or cancellation.
+            // Failed channel admission rolls this increment back below.
+            self.metrics.record_queued();
 
             // Auto-persist if callback set
             if let Some(callback) = &self.persistence_callback {
@@ -151,13 +154,17 @@ impl AppTasks {
         )
         .await
         {
-            Ok(Ok(_)) => {
-                self.metrics.record_queued();
-                Ok(task_id)
-            }
+            Ok(Ok(_)) => Ok(task_id),
             _ => {
-                // Remove from state if queueing failed
-                self.task_states.write().await.remove(&task_id);
+                // Undo admission under the state lock. A worker could not
+                // claim a task that was never sent into the channel.
+                let mut states = self.task_states.write().await;
+                if states.remove(&task_id).is_some() {
+                    self.metrics.record_cancelled();
+                    if let Some(callback) = &self.persistence_callback {
+                        callback(&states);
+                    }
+                }
                 Err(error_stack::report!(TaskQueueError)
                     .attach_printable("Failed to send task to queue")
                     .attach_printable("Timeout or channel disconnected")
@@ -374,8 +381,8 @@ impl AppTasks {
             .load(std::sync::atomic::Ordering::Relaxed)
     }
 
-    /// Cancel a task by ID. If the task is in-progress, signals the worker
-    /// to abort it. If queued, marks it as cancelled immediately.
+    /// Cancel a task by ID. Running work receives its token; queued or
+    /// retry-waiting work is terminal before a worker can claim it.
     /// Returns true if the task was found and cancellation was initiated.
     pub async fn cancel_task(&self, task_id: &str) -> bool {
         // Serialize cancellation with worker claim and settlement. A delayed
