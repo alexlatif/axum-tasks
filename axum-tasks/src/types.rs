@@ -80,7 +80,10 @@ pub struct TaskState {
 
 impl TaskState {
     pub fn is_terminal(&self) -> bool {
-        matches!(self.status, TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled)
+        matches!(
+            self.status,
+            TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+        )
     }
 
     pub fn can_retry(&self) -> bool {

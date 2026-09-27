@@ -4,41 +4,41 @@
 //!
 //! ## Quick Start
 //!
-//! ```rust
-//! use axum::{Router, routing::post};
-//! use axum_background_tasks::{AppTasks, Task, TaskResult, admin_routes, HasTasks};
-//! use serde::{Serialize, Deserialize};
+//! ```no_run
+//! use axum::{Router, extract::State, routing::post};
+//! use axum_tasks::{AppTasks, HasTasks, Task, TaskOutput, admin_routes, spawn_task_workers};
+//! use serde::{Deserialize, Serialize};
+//! use axum_tasks::CancellationToken;
 //!
 //! #[derive(Task, Serialize, Deserialize)]
 //! #[task(description = "Processing data", retry = true)]
-//! struct DataProcessing {
-//!     data_id: String,
-//! }
+//! struct DataProcessing { data_id: String }
 //!
 //! impl DataProcessing {
-//!     pub async fn execute(&self) -> TaskResult {
-//!         // Your task logic here
-//!         TaskResult::Success("autosave data".to_string())
+//!     async fn execute(&self) -> TaskOutput {
+//!         TaskOutput::Success(serde_json::json!({"id": self.data_id}))
 //!     }
 //! }
 //!
-//! #[derive(HasTasks)]
-//! struct AppState {
-//!     tasks: AppTasks,
+//! #[derive(Clone, HasTasks)]
+//! struct AppState { tasks: AppTasks }
+//!
+//! async fn process_handler(State(state): State<AppState>) -> String {
+//!     state.tasks.queue(DataProcessing { data_id: "example".into() })
+//!         .await.expect("queue task")
 //! }
 //!
 //! #[tokio::main]
 //! async fn main() {
-//!     let app_state = AppState {
-//!         tasks: AppTasks::new(),
-//!     };
-//!     
+//!     let state = AppState { tasks: AppTasks::new() };
+//!     let shutdown = CancellationToken::new();
+//!     spawn_task_workers(state.tasks.clone(), shutdown, None);
 //!     let app = Router::new()
 //!         .route("/process", post(process_handler))
 //!         .nest("/admin", admin_routes::<AppState>())
-//!         .with_state(app_state);
-//!         
-//!     // Start workers and server
+//!         .with_state(state);
+//!     let listener = tokio::net::TcpListener::bind("127.0.0.1:3000").await.unwrap();
+//!     axum::serve(listener, app).await.unwrap();
 //! }
 //! ```
 

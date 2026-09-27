@@ -13,6 +13,7 @@ use tokio::sync::RwLock;
 
 /// Default task timeout: 30 minutes.
 const DEFAULT_TASK_TIMEOUT_SECS: u64 = 30 * 60;
+type PersistCallback = dyn Fn(&HashMap<String, TaskState>) + Send + Sync;
 
 #[derive(Clone)]
 pub struct AppTasks {
@@ -22,7 +23,7 @@ pub struct AppTasks {
     metrics: Arc<TaskMetrics>,
     task_states: Arc<tokio::sync::RwLock<HashMap<String, TaskState>>>,
     results_cache: Arc<RwLock<HashMap<String, CachedJobResult>>>,
-    persistence_callback: Option<Arc<dyn Fn(&HashMap<String, TaskState>) + Send + Sync>>,
+    persistence_callback: Option<Arc<PersistCallback>>,
     is_shutting_down: Arc<std::sync::atomic::AtomicBool>,
     /// Per-task cancellation tokens. Workers check these during execution.
     cancellation_tokens: Arc<RwLock<HashMap<String, tokio_util::sync::CancellationToken>>>,
@@ -43,20 +44,26 @@ impl AppTasks {
             persistence_callback: None,
             is_shutting_down: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancellation_tokens: Arc::new(RwLock::new(HashMap::new())),
-            task_timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(DEFAULT_TASK_TIMEOUT_SECS)),
+            task_timeout_secs: Arc::new(std::sync::atomic::AtomicU64::new(
+                DEFAULT_TASK_TIMEOUT_SECS,
+            )),
         }
     }
 
     /// Set the task timeout in seconds. Tasks running longer than this are auto-failed.
     /// Default: 30 minutes (1800 seconds).
     pub fn with_task_timeout(self, timeout_secs: u64) -> Self {
-        self.task_timeout_secs.store(timeout_secs, std::sync::atomic::Ordering::Relaxed);
+        self.task_timeout_secs
+            .store(timeout_secs, std::sync::atomic::Ordering::Relaxed);
         self
     }
 
     /// Get the current task timeout.
     pub fn task_timeout(&self) -> Duration {
-        Duration::from_secs(self.task_timeout_secs.load(std::sync::atomic::Ordering::Relaxed))
+        Duration::from_secs(
+            self.task_timeout_secs
+                .load(std::sync::atomic::Ordering::Relaxed),
+        )
     }
 
     /// Enable automatic persistence when task states change
@@ -168,20 +175,18 @@ impl AppTasks {
         for (task_id, task_state) in &*task_states {
             if matches!(
                 task_state.status,
-                TaskStatus::Queued | TaskStatus::InProgress
-            ) {
-                if let Ok(task_data) = serde_json::to_vec(&task_state.task_data) {
-                    let queued_task = QueuedTask {
-                        id: task_id.clone(),
-                        task_name: task_state.task_name.clone(),
-                        task_data,
-                        retry_count: task_state.retry_count,
-                        created_at: std::time::Instant::now(),
-                    };
-
-                    // Best effort recovery - don't block startup if queue is full
-                    let _ = self.sender.try_send(queued_task);
-                }
+                TaskStatus::Queued | TaskStatus::InProgress | TaskStatus::Retrying
+            ) && let Ok(task_data) = serde_json::to_vec(&task_state.task_data)
+            {
+                let queued_task = QueuedTask {
+                    id: task_id.clone(),
+                    task_name: task_state.task_name.clone(),
+                    task_data,
+                    retry_count: task_state.retry_count,
+                    created_at: std::time::Instant::now(),
+                };
+                // Best effort recovery - don't block startup if queue is full
+                let _ = self.sender.try_send(queued_task);
             }
         }
 
@@ -227,7 +232,7 @@ impl AppTasks {
             .cloned()
             .collect();
 
-        tasks.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.created_at));
 
         if let Some(limit) = limit {
             tasks.truncate(limit);
@@ -373,56 +378,58 @@ impl AppTasks {
     /// to abort it. If queued, marks it as cancelled immediately.
     /// Returns true if the task was found and cancellation was initiated.
     pub async fn cancel_task(&self, task_id: &str) -> bool {
-        let states = self.task_states.read().await;
-        let status = match states.get(task_id) {
-            Some(task) => task.status.clone(),
-            None => return false,
+        // Serialize cancellation with worker claim and settlement. A delayed
+        // retry has no live token but is just as cancellable as queued work.
+        let mut states = self.task_states.write().await;
+        let Some(task) = states.get_mut(task_id) else {
+            return false;
         };
-        drop(states);
-
-        match status {
-            TaskStatus::Queued => {
-                // Mark as cancelled directly
-                self.update_task_status(
-                    task_id,
-                    TaskStatus::Cancelled,
-                    None,
-                    None,
-                    Some("Cancelled by user".to_string()),
-                ).await;
-                true
-            }
-            TaskStatus::InProgress => {
-                // Signal the cancellation token
-                let tokens = self.cancellation_tokens.read().await;
-                if let Some(token) = tokens.get(task_id) {
-                    token.cancel();
-                    tracing::info!(task_id = %task_id, "Cancellation signalled for in-progress task");
-                    true
-                } else {
-                    // Token not found — force-fail the task
-                    tracing::warn!(task_id = %task_id, "No cancellation token found, force-failing task");
-                    self.update_task_status(
-                        task_id,
-                        TaskStatus::Cancelled,
-                        None,
-                        None,
-                        Some("Force-cancelled (no token)".to_string()),
-                    ).await;
-                    true
-                }
-            }
-            // Already terminal
-            _ => false,
+        if task.is_terminal() {
+            return false;
         }
+        let tokens = self.cancellation_tokens.read().await;
+        if let Some(token) = tokens.get(task_id) {
+            token.cancel();
+        }
+        // Keep the token lock until status is terminal: removal after a
+        // completed worker must not race a cancellation of that same task.
+        task.status = TaskStatus::Cancelled;
+        task.completed_at = Some(Utc::now());
+        task.error_message = Some("Cancelled by user".into());
+        self.metrics.record_cancelled();
+        if let Some(callback) = &self.persistence_callback {
+            callback(&states);
+        }
+        true
     }
 
-    /// Create a cancellation token for a task. Called by worker before execution.
-    pub(crate) async fn create_cancellation_token(&self, task_id: &str) -> tokio_util::sync::CancellationToken {
+    /// Atomically claim a queued generation and install its cancellation token.
+    pub(crate) async fn claim_task(
+        &self,
+        task_id: &str,
+        worker_id: usize,
+        retry_count: u32,
+    ) -> Option<tokio_util::sync::CancellationToken> {
+        let mut states = self.task_states.write().await;
+        let task = states.get_mut(task_id)?;
+        if !matches!(task.status, TaskStatus::Queued | TaskStatus::Retrying)
+            || task.retry_count != retry_count
+        {
+            return None;
+        }
         let token = tokio_util::sync::CancellationToken::new();
-        let mut tokens = self.cancellation_tokens.write().await;
-        tokens.insert(task_id.to_string(), token.clone());
-        token
+        self.cancellation_tokens
+            .write()
+            .await
+            .insert(task_id.to_owned(), token.clone());
+        task.status = TaskStatus::InProgress;
+        task.worker_id = Some(worker_id);
+        task.started_at = Some(Utc::now());
+        task.completed_at = None;
+        if let Some(callback) = &self.persistence_callback {
+            callback(&states);
+        }
+        Some(token)
     }
 
     /// Remove a cancellation token after task completes. Called by worker.
@@ -446,10 +453,16 @@ impl AppTasks {
         worker_id: Option<usize>,
         duration_ms: Option<u64>,
         error_message: Option<String>,
-    ) {
+    ) -> bool {
         let mut states = self.task_states.write().await;
         if let Some(task) = states.get_mut(task_id) {
             let old_status = task.status.clone();
+            // A late worker result, timeout or retry scheduler cannot undo a
+            // user cancellation or another terminal outcome. Retrying is
+            // claimed only by claim_task, which checks its generation.
+            if task.is_terminal() || old_status == TaskStatus::Retrying {
+                return false;
+            }
 
             task.status = status.clone();
             task.worker_id = worker_id;
@@ -502,7 +515,9 @@ impl AppTasks {
             if let Some(callback) = &self.persistence_callback {
                 callback(&states);
             }
+            return true;
         }
+        false
     }
 }
 

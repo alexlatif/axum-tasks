@@ -38,6 +38,10 @@ impl TaskMetrics {
         self.queue_depth.fetch_sub(1, Ordering::Relaxed);
     }
 
+    pub fn record_cancelled(&self) {
+        self.queue_depth.fetch_sub(1, Ordering::Relaxed);
+    }
+
     pub fn record_retried(&self) {
         self.tasks_retried.fetch_add(1, Ordering::Relaxed);
         // Don't change queue depth for retries

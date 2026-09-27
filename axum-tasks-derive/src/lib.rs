@@ -5,19 +5,12 @@ use syn::{Attribute, Data, DeriveInput, Fields, Lit, Meta, parse_macro_input};
 /// Derive macro that automatically implements TaskHandler
 ///
 /// Usage:
-/// ```rust
-/// #[derive(Task)]
+/// ```text
+/// #[derive(Task, Serialize, Deserialize)]
 /// #[task(description = "Analyzing telemetry data", retry = true)]
-/// pub struct TelemetryAnalysis {
-///     pub session_id: String,
-///     pub file_path: String,
-/// }
-///
-/// impl TelemetryAnalysis {
-///     async fn execute(&self) -> TaskResult {
-///         // Your implementation here
-///     }
-/// }
+/// pub struct TelemetryAnalysis { pub session_id: String }
+/// // Implement execute(&self) -> axum_tasks::TaskOutput in a consumer
+/// // crate. Proc-macro crates cannot import their dependent runtime here.
 /// ```
 #[proc_macro_derive(Task, attributes(task))]
 pub fn derive_task(input: TokenStream) -> TokenStream {
@@ -89,7 +82,7 @@ pub fn derive_task(input: TokenStream) -> TokenStream {
                             .map_err(|e| axum_tasks::TaskResult::PermanentError(
                                 format!("Deserialization failed: {}", e)
                             ))?;
-                        Ok(task.handle(&app_tasks, &job_id).await)
+                        Ok(axum_tasks::TaskHandler::handle(&task, &app_tasks, &job_id).await)
                     })
                 }
             }
@@ -135,17 +128,13 @@ fn parse_task_attributes(attrs: &[Attribute]) -> Result<(String, bool), String> 
                     attr.parse_nested_meta(|nested| {
                         if nested.path.is_ident("description") {
                             let value = nested.value()?;
-                            if let Ok(lit_str) = value.parse::<Lit>() {
-                                if let Lit::Str(s) = lit_str {
-                                    description = s.value();
-                                }
+                            if let Ok(Lit::Str(s)) = value.parse::<Lit>() {
+                                description = s.value();
                             }
                         } else if nested.path.is_ident("retry") {
                             let value = nested.value()?;
-                            if let Ok(lit_bool) = value.parse::<Lit>() {
-                                if let Lit::Bool(b) = lit_bool {
-                                    retry = b.value();
-                                }
+                            if let Ok(Lit::Bool(b)) = value.parse::<Lit>() {
+                                retry = b.value();
                             }
                         }
                         Ok(())
@@ -175,10 +164,10 @@ fn find_tasks_field(data: &Data) -> proc_macro2::TokenStream {
                 Fields::Named(fields) => {
                     // TODO: type checks
                     for field in &fields.named {
-                        if let Some(ident) = &field.ident {
-                            if ident == "tasks" {
-                                return quote! { #ident };
-                            }
+                        if let Some(ident) = &field.ident
+                            && ident == "tasks"
+                        {
+                            return quote! { #ident };
                         }
                     }
 

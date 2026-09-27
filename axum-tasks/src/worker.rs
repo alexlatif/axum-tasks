@@ -66,27 +66,17 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
         );
     }
 
-    // Check if task was already cancelled while queued
-    if let Some(status) = app_tasks.get_status(&task.id).await {
-        if matches!(status, TaskStatus::Cancelled) {
-            tracing::info!(task_id = %task.id, "Skipping already-cancelled task");
-            return;
-        }
-    }
-
-    // Create a per-task cancellation token before marking in-progress
-    let cancel_token = app_tasks.create_cancellation_token(&task.id).await;
+    // Claim and install the cancellation token atomically with the state
+    // check. A cancelled delayed retry (or a duplicate queue message) cannot
+    // overwrite a terminal or already-running task.
+    let Some(cancel_token) = app_tasks
+        .claim_task(&task.id, worker_id, task.retry_count)
+        .await
+    else {
+        tracing::info!(task_id = %task.id, "Skipping stale or cancelled task");
+        return;
+    };
     let timeout = app_tasks.task_timeout();
-
-    app_tasks
-        .update_task_status(
-            &task.id,
-            TaskStatus::InProgress,
-            Some(worker_id),
-            None,
-            None,
-        )
-        .await;
 
     // Execute with timeout and cancellation
     let result = tokio::select! {
@@ -112,14 +102,15 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
                 "Task timed out"
             );
             let duration_ms = start_time.elapsed().as_millis() as u64;
-            app_tasks.update_task_status(
+            if app_tasks.update_task_status(
                 &task.id,
                 TaskStatus::Failed,
                 Some(worker_id),
                 Some(duration_ms),
                 Some(format!("Task timed out after {}s", timeout.as_secs())),
-            ).await;
-            app_tasks.metrics_ref().record_failed();
+            ).await {
+                app_tasks.metrics_ref().record_failed();
+            }
             app_tasks.remove_cancellation_token(&task.id).await;
             return;
         }
@@ -133,7 +124,7 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
 
     match result {
         TaskResult::Success => {
-            app_tasks
+            if app_tasks
                 .update_task_status(
                     &task.id,
                     TaskStatus::Completed,
@@ -141,9 +132,10 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
                     Some(duration_ms),
                     None,
                 )
-                .await;
-
-            app_tasks.metrics_ref().record_completed();
+                .await
+            {
+                app_tasks.metrics_ref().record_completed();
+            }
 
             tracing::info!(
                 task_id = %task.id,
@@ -164,7 +156,7 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
                     "Task failed, scheduling retry"
                 );
 
-                app_tasks
+                if app_tasks
                     .update_task_status(
                         &task.id,
                         TaskStatus::Retrying,
@@ -172,11 +164,12 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
                         Some(duration_ms),
                         Some(error.clone()),
                     )
-                    .await;
-
-                schedule_retry(task, delay, app_tasks).await;
+                    .await
+                {
+                    schedule_retry(task, delay, app_tasks).await;
+                }
             } else {
-                app_tasks
+                if app_tasks
                     .update_task_status(
                         &task.id,
                         TaskStatus::Failed,
@@ -184,9 +177,10 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
                         Some(duration_ms),
                         Some(format!("Max retries exceeded: {}", error)),
                     )
-                    .await;
-
-                app_tasks.metrics_ref().record_failed();
+                    .await
+                {
+                    app_tasks.metrics_ref().record_failed();
+                }
 
                 tracing::error!(
                     task_id = %task.id,
@@ -198,7 +192,7 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
         }
 
         TaskResult::PermanentError(error) => {
-            app_tasks
+            if app_tasks
                 .update_task_status(
                     &task.id,
                     TaskStatus::Failed,
@@ -206,9 +200,10 @@ async fn process_task(worker_id: usize, task: QueuedTask, app_tasks: &AppTasks) 
                     Some(duration_ms),
                     Some(error.clone()),
                 )
-                .await;
-
-            app_tasks.metrics_ref().record_failed();
+                .await
+            {
+                app_tasks.metrics_ref().record_failed();
+            }
 
             tracing::error!(
                 task_id = %task.id,
@@ -261,4 +256,129 @@ fn calculate_retry_delay(retry_count: u32) -> Duration {
     let base_delay = 2_u64.pow(retry_count);
     let delay_seconds = std::cmp::min(base_delay, 300); // Cap at 5 minutes
     Duration::from_secs(delay_seconds)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde::Serialize;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static EXECUTIONS: AtomicUsize = AtomicUsize::new(0);
+    #[derive(Serialize)]
+    struct Probe;
+    inventory::submit! {
+        crate::TaskRegistration {
+            name: "Probe",
+            handler: |_data, _tasks, _id| Box::pin(async {
+                EXECUTIONS.fetch_add(1, Ordering::SeqCst);
+                Ok(TaskResult::Success)
+            }),
+        }
+    }
+
+    #[crate::async_trait]
+    impl crate::TaskHandler for Probe {
+        async fn handle(&self, _: &AppTasks, _: &str) -> TaskResult {
+            TaskResult::Success
+        }
+        fn description(&self) -> String {
+            "probe".into()
+        }
+        fn is_retryable(&self, _: &str) -> bool {
+            false
+        }
+    }
+
+    #[tokio::test]
+    async fn cancelled_retry_never_executes_or_loses_terminal_status() {
+        let tasks = AppTasks::new();
+        let id = tasks.queue(Probe).await.unwrap();
+        let queued = tasks.receiver().try_recv().unwrap();
+        tasks
+            .update_task_status(
+                &id,
+                TaskStatus::Retrying,
+                Some(0),
+                None,
+                Some("temporary".into()),
+            )
+            .await;
+        assert!(
+            tasks.cancel_task(&id).await,
+            "retry-waiting tasks must be cancellable"
+        );
+        assert_eq!(tasks.get_status(&id).await, Some(TaskStatus::Cancelled));
+        assert_eq!(tasks.queue_depth(), 0);
+        let before = EXECUTIONS.load(Ordering::SeqCst);
+        process_task(0, queued, &tasks).await;
+        assert_eq!(EXECUTIONS.load(Ordering::SeqCst), before);
+        assert_eq!(tasks.get_status(&id).await, Some(TaskStatus::Cancelled));
+    }
+
+    #[tokio::test]
+    async fn cancel_running_task_fences_late_success_and_duplicate_queue() {
+        let tasks = AppTasks::new();
+        let id = tasks.queue(Probe).await.unwrap();
+        let queued = tasks.receiver().try_recv().unwrap();
+        let token = tasks.claim_task(&id, 0, 0).await.unwrap();
+        assert!(tasks.cancel_task(&id).await);
+        assert!(token.is_cancelled());
+        tasks
+            .update_task_status(&id, TaskStatus::Completed, Some(0), Some(1), None)
+            .await;
+        let before = EXECUTIONS.load(Ordering::SeqCst);
+        process_task(1, queued, &tasks).await;
+        assert_eq!(EXECUTIONS.load(Ordering::SeqCst), before);
+        assert_eq!(tasks.get_status(&id).await, Some(TaskStatus::Cancelled));
+        assert_eq!(tasks.queue_depth(), 0);
+    }
+
+    #[tokio::test]
+    async fn stale_retry_generation_cannot_claim_new_queued_work() {
+        let tasks = AppTasks::new();
+        let id = tasks.queue(Probe).await.unwrap();
+        let old = tasks.receiver().try_recv().unwrap();
+        tasks
+            .update_task_status(
+                &id,
+                TaskStatus::Retrying,
+                Some(0),
+                None,
+                Some("temporary".into()),
+            )
+            .await;
+        assert!(tasks.claim_task(&id, 0, old.retry_count).await.is_none());
+        let next = QueuedTask {
+            retry_count: 1,
+            ..old
+        };
+        assert!(tasks.claim_task(&id, 0, next.retry_count).await.is_some());
+    }
+
+    #[tokio::test]
+    async fn delayed_retry_does_not_revive_a_cancelled_task() {
+        let tasks = AppTasks::new();
+        let id = tasks.queue(Probe).await.unwrap();
+        let queued = tasks.receiver().try_recv().unwrap();
+        tasks
+            .update_task_status(
+                &id,
+                TaskStatus::Retrying,
+                Some(0),
+                None,
+                Some("temporary".into()),
+            )
+            .await;
+        schedule_retry(queued, Duration::from_millis(1), &tasks).await;
+        assert!(tasks.cancel_task(&id).await);
+        let delayed = tokio::time::timeout(Duration::from_secs(1), tasks.receiver().recv_async())
+            .await
+            .unwrap()
+            .unwrap();
+        let before = EXECUTIONS.load(Ordering::SeqCst);
+        process_task(1, delayed, &tasks).await;
+        assert_eq!(EXECUTIONS.load(Ordering::SeqCst), before);
+        assert_eq!(tasks.get_status(&id).await, Some(TaskStatus::Cancelled));
+    }
 }
