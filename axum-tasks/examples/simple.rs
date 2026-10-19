@@ -5,8 +5,7 @@ use axum::{
     routing::{get, post},
 };
 use axum_tasks::{
-    AppTasks, CancellationToken, HasTasks, Task, TaskHandler, TaskOutput, admin_routes,
-    spawn_task_workers,
+    AppTasks, CancellationToken, HasTasks, Task, TaskOutput, admin_routes, spawn_task_workers,
 };
 use serde::{Deserialize, Serialize};
 use tokio::fs;
@@ -26,7 +25,7 @@ impl DataProcessor {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
         // Randomly succeed or fail
-        if self.data.len() % 3 == 0 {
+        if self.data.len().is_multiple_of(3) {
             TaskOutput::RetryableError("Temporary processing error".to_string())
         } else {
             // auotsaves
@@ -60,11 +59,11 @@ impl AppState {
     async fn load() -> Self {
         let app_state = Self::new();
 
-        if let Ok(json) = fs::read_to_string("tasks_state.json").await {
-            if let Ok(task_states) = serde_json::from_str(&json) {
-                app_state.tasks.load_state(task_states).await;
-                info!("Loaded existing task state from file");
-            }
+        if let Ok(json) = fs::read_to_string("tasks_state.json").await
+            && let Ok(task_states) = serde_json::from_str(&json)
+        {
+            app_state.tasks.load_state(task_states).await;
+            info!("Loaded existing task state from file");
         }
 
         app_state
